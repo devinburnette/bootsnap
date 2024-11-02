@@ -120,21 +120,10 @@ enum cache_status {
   hit,
   stale,
 };
-
-enum cache_mismatch_reason {
-  REASON_NONE,
-  REASON_VERSION_MISMATCH,
-  REASON_RUBY_PLATFORM_MISMATCH,
-  REASON_COMPILE_OPTION_MISMATCH,
-  REASON_RUBY_REVISION_MISMATCH,
-  REASON_SIZE_MISMATCH,
-  REASON_MTIME_MISMATCH,
-  REASON_DIGEST_MISMATCH
-};
 static void bs_cache_path(const char * cachedir, const VALUE path, char (* cache_path)[MAX_CACHEPATH_SIZE]);
 static int bs_read_key(int fd, struct bs_cache_key * key);
-static enum cache_status cache_key_equal_fast_path(struct bs_cache_key * k1, struct bs_cache_key * k2, enum cache_mismatch_reason *reason, uint32_t *expected_version, uint32_t *actual_version);
-static int cache_key_equal_slow_path(struct bs_cache_key * current_key, struct bs_cache_key * cached_key, const VALUE input_data, enum cache_mismatch_reason *reason);
+static enum cache_status cache_key_equal_fast_path(struct bs_cache_key * k1, struct bs_cache_key * k2);
+static int cache_key_equal_slow_path(struct bs_cache_key * current_key, struct bs_cache_key * cached_key, const VALUE input_data);
 static int update_cache_key(struct bs_cache_key *current_key, struct bs_cache_key *old_key, int cache_fd, const char ** errno_provenance);
 
 static void bs_cache_key_digest(struct bs_cache_key * key, const VALUE input_data);
@@ -211,15 +200,10 @@ bs_instrumentation_enabled_set(VALUE self, VALUE enabled)
 }
 
 static inline void
-bs_instrumentation(VALUE event, VALUE path, const char* reason, uint32_t *expected_version, uint32_t *actual_version) {
+bs_instrumentation(VALUE event, VALUE path)
+{
     if (RB_UNLIKELY(instrumentation_enabled)) {
-      VALUE reason_str;
-      if (reason != NULL) {
-        reason_str = rb_str_new_cstr(reason);
-      } else {
-        reason_str = Qnil;
-      }
-      rb_funcall(rb_mBootsnap, instrumentation_method, 3, event, path, reason_str, &expected_version, &actual_version);
+       rb_funcall(rb_mBootsnap, instrumentation_method, 2, event, path);
     }
 }
 
@@ -336,55 +320,28 @@ bs_cache_path(const char * cachedir, const VALUE path, char (* cache_path)[MAX_C
  * function.
  */
 static enum cache_status cache_key_equal_fast_path(struct bs_cache_key *k1,
-                                     struct bs_cache_key *k2,
-                                     enum cache_mismatch_reason *reason,
-                                     uint32_t *expected_version,
-                                     uint32_t *actual_version) {
-  if (k1->version != k2->version) {
-    *reason = REASON_VERSION_MISMATCH;
-    *expected_version = k2->version;
-    *actual_version = k1->version;
-    return miss;
+                                     struct bs_cache_key *k2) {
+  if (k1->version == k2->version &&
+          k1->ruby_platform == k2->ruby_platform &&
+          k1->compile_option == k2->compile_option &&
+          k1->ruby_revision == k2->ruby_revision && k1->size == k2->size) {
+      /*if (k1->mtime == k2->mtime) {*/
+      /*  return hit;*/
+      /*}*/
+      if (revalidation) {
+        return stale;
+      }
+      return hit;
   }
-  if (k1->ruby_platform != k2->ruby_platform) {
-    *reason = REASON_RUBY_PLATFORM_MISMATCH;
-    return miss;
-  }
-  if (k1->compile_option != k2->compile_option) {
-    *reason = REASON_COMPILE_OPTION_MISMATCH;
-    return miss;
-  }
-  if (k1->ruby_revision != k2->ruby_revision) {
-    *reason = REASON_RUBY_REVISION_MISMATCH;
-    return miss;
-  }
-  if (k1->size != k2->size) {
-    *reason = REASON_SIZE_MISMATCH;
-    return miss;
-  }
-  /*if (k1->mtime != k2->mtime) {*/
-  /*  *reason = REASON_MTIME_MISMATCH;*/
-  /*  if (revalidation) {*/
-  /*    return stale;*/
-  /*  } else {*/
-  /*    return miss;*/
-  /*  }*/
-  /*}*/
-  *reason = REASON_NONE;
-  return hit;
+  return miss;
 }
 
 static int cache_key_equal_slow_path(struct bs_cache_key *current_key,
                                      struct bs_cache_key *cached_key,
-                                     const VALUE input_data,
-                                     enum cache_mismatch_reason *reason)
+                                     const VALUE input_data)
 {
   bs_cache_key_digest(current_key, input_data);
-  if (current_key->digest != cached_key->digest) {
-    *reason = REASON_DIGEST_MISMATCH;
-    return 0; // Mismatch
-  }
-  return 1; // Match
+  return current_key->digest == cached_key->digest;
 }
 
 static int update_cache_key(struct bs_cache_key *current_key, struct bs_cache_key *old_key, int cache_fd, const char ** errno_provenance)
@@ -810,10 +767,6 @@ bs_read_contents(int fd, size_t size, const char ** errno_provenance)
 static VALUE
 bs_fetch(char * path, VALUE path_v, char * cache_path, VALUE handler, VALUE args)
 {
-  const char* reason_str = NULL;
-  uint32_t expected_version = 0;
-  uint32_t actual_version = 0;
-  enum cache_mismatch_reason mismatch_reason = REASON_NONE;
   struct bs_cache_key cached_key, current_key;
   int cache_fd = -1, current_fd = -1;
   int res, valid_cache = 0, exception_tag = 0;
@@ -838,10 +791,7 @@ bs_fetch(char * path, VALUE path_v, char * cache_path, VALUE handler, VALUE args
   cache_fd = open_cache_file(cache_path, &cached_key, &errno_provenance);
   if (cache_fd == CACHE_MISS || cache_fd == CACHE_STALE) {
     /* This is ok: valid_cache remains false, we re-populate it. */
-    const char* reason_str = "cache miss or stale";
-    uint32_t expected_version = 0;
-    uint32_t actual_version = 0;
-    bs_instrumentation(cache_fd == CACHE_MISS ? sym_miss : sym_stale, path_v, reason_str, &expected_version, &actual_version);
+    bs_instrumentation(cache_fd == CACHE_MISS ? sym_miss : sym_stale, path_v);
   } else if (cache_fd < 0) {
     exception_message = rb_str_new_cstr(cache_path);
     goto fail_errno;
@@ -849,7 +799,7 @@ bs_fetch(char * path, VALUE path_v, char * cache_path, VALUE handler, VALUE args
     /* True if the cache existed and no invalidating changes have occurred since
      * it was generated. */
 
-    switch(cache_key_equal_fast_path(&current_key, &cached_key, &mismatch_reason, &expected_version, &actual_version)) {
+    switch(cache_key_equal_fast_path(&current_key, &cached_key)) {
     case hit:
       status = sym_hit;
       valid_cache = true;
@@ -864,7 +814,7 @@ bs_fetch(char * path, VALUE path_v, char * cache_path, VALUE handler, VALUE args
         exception_message = path_v;
         goto fail_errno;
       }
-      valid_cache = cache_key_equal_slow_path(&current_key, &cached_key, input_data, &mismatch_reason);
+      valid_cache = cache_key_equal_slow_path(&current_key, &cached_key, input_data);
       if (valid_cache) {
         if (!readonly) {
           if (update_cache_key(&current_key, &cached_key, cache_fd, &errno_provenance)) {
@@ -879,32 +829,6 @@ bs_fetch(char * path, VALUE path_v, char * cache_path, VALUE handler, VALUE args
 
     if (!valid_cache) {
       status = sym_stale;
-      switch (mismatch_reason) {
-        case REASON_VERSION_MISMATCH:
-          reason_str = "version mismatch";
-          break;
-        case REASON_RUBY_PLATFORM_MISMATCH:
-          reason_str = "ruby platform mismatch";
-          break;
-        case REASON_COMPILE_OPTION_MISMATCH:
-          reason_str = "compile option mismatch";
-          break;
-        case REASON_RUBY_REVISION_MISMATCH:
-          reason_str = "ruby revision mismatch";
-          break;
-        case REASON_SIZE_MISMATCH:
-          reason_str = "size mismatch";
-          break;
-        case REASON_MTIME_MISMATCH:
-          reason_str = "mtime mismatch";
-          break;
-        case REASON_DIGEST_MISMATCH:
-          reason_str = "digest mismatch";
-          break;
-        default:
-          reason_str = "unknown reason";
-          break;
-      }
     }
   }
 
@@ -991,7 +915,7 @@ bs_fetch(char * path, VALUE path_v, char * cache_path, VALUE handler, VALUE args
 #define CLEANUP \
   if (current_fd >= 0)  close(current_fd); \
   if (cache_fd >= 0)    close(cache_fd); \
-  if (status != Qfalse) bs_instrumentation(status, path_v, reason_str, &expected_version, &actual_version);
+  if (status != Qfalse) bs_instrumentation(status, path_v);
 
 succeed:
   CLEANUP;
@@ -1025,13 +949,11 @@ bs_precompile(char * path, VALUE path_v, char * cache_path, VALUE handler)
   if (readonly) {
     return Qfalse;
   }
+
   struct bs_cache_key cached_key, current_key;
   int cache_fd = -1, current_fd = -1;
   int res, valid_cache = 0, exception_tag = 0;
   const char * errno_provenance = NULL;
-  enum cache_mismatch_reason mismatch_reason = REASON_NONE;
-  uint32_t expected_version = 0;
-  uint32_t actual_version = 0;
 
   VALUE input_data = Qfalse;   /* data read from source file, e.g. YAML or ruby source */
   VALUE storage_data; /* compiled data, e.g. msgpack / binary iseq */
@@ -1049,7 +971,7 @@ bs_precompile(char * path, VALUE path_v, char * cache_path, VALUE handler)
   } else {
     /* True if the cache existed and no invalidating changes have occurred since
      * it was generated. */
-    switch(cache_key_equal_fast_path(&current_key, &cached_key, &mismatch_reason, &expected_version, &actual_version)) {
+    switch(cache_key_equal_fast_path(&current_key, &cached_key)) {
     case hit:
       valid_cache = true;
       break;
@@ -1061,7 +983,7 @@ bs_precompile(char * path, VALUE path_v, char * cache_path, VALUE handler)
       if ((input_data = bs_read_contents(current_fd, current_key.size, &errno_provenance)) == Qfalse) {
         goto fail;
       }
-      valid_cache = cache_key_equal_slow_path(&current_key, &cached_key, input_data, &mismatch_reason);
+      valid_cache = cache_key_equal_slow_path(&current_key, &cached_key, input_data);
        if (valid_cache) {
          if (update_cache_key(&current_key, &cached_key, cache_fd, &errno_provenance)) {
              goto fail;
