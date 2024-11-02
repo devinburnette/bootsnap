@@ -219,7 +219,7 @@ bs_instrumentation(VALUE event, VALUE path, const char* reason, uint32_t *expect
       } else {
         reason_str = Qnil;
       }
-      rb_funcall(rb_mBootsnap, instrumentation_method, 3, event, path, reason_str, expected_version, actual_version);
+      rb_funcall(rb_mBootsnap, instrumentation_method, 3, event, path, reason_str, &expected_version, &actual_version);
     }
 }
 
@@ -362,14 +362,14 @@ static enum cache_status cache_key_equal_fast_path(struct bs_cache_key *k1,
     *reason = REASON_SIZE_MISMATCH;
     return miss;
   }
-  if (k1->mtime != k2->mtime) {
-    *reason = REASON_MTIME_MISMATCH;
-    if (revalidation) {
-      return stale;
-    } else {
-      return miss;
-    }
-  }
+  /*if (k1->mtime != k2->mtime) {*/
+  /*  *reason = REASON_MTIME_MISMATCH;*/
+  /*  if (revalidation) {*/
+  /*    return stale;*/
+  /*  } else {*/
+  /*    return miss;*/
+  /*  }*/
+  /*}*/
   *reason = REASON_NONE;
   return hit;
 }
