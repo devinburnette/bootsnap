@@ -13,7 +13,7 @@ module Bootsnap
 
     def log_stats!
       stats = {hit: 0, revalidated: 0, miss: 0, stale: 0}
-      self.instrumentation = ->(event, _path, _reason) { stats[event] += 1 }
+      self.instrumentation = ->(event, _path, _reason, _expected_version, _actual_version) { stats[event] += 1 }
       Kernel.at_exit do
         stats.each do |event, count|
           $stderr.puts "bootsnap #{event}: #{count}"
@@ -28,9 +28,9 @@ module Bootsnap
     def logger=(logger)
       @logger = logger
       self.instrumentation = if logger.respond_to?(:debug)
-        ->(event, path, reason) { @logger.debug("[Bootsnap] #{event} #{path} #{reason}") unless event == :hit }
+        ->(event, path, reason, expected_version, actual_version) { @logger.debug("[Bootsnap] #{event} #{path} #{reason} #{expected_version} #{actual_version}") unless event == :hit }
       else
-        ->(event, path, reason) { @logger.call("[Bootsnap] #{event} #{path} #{reason}") unless event == :hit }
+        ->(event, path, reason, expected_version, actual_version) { @logger.call("[Bootsnap] #{event} #{path} #{reason} #{expected_version} #{actual_version}") unless event == :hit }
       end
     end
 
@@ -41,8 +41,8 @@ module Bootsnap
       end
     end
 
-    def _instrument(event, path, reason = nil)
-      @instrumentation.call(event, path, reason)
+    def _instrument(event, path, reason = nil, expected_version = 0, actual_version = 0)
+      @instrumentation.call(event, path, reason, expected_version, actual_version)
     end
 
     def setup(
