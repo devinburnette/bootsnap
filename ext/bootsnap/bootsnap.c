@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <inttypes.h>
 
 #ifdef __APPLE__
   // The symbol is present, however not in the headers
@@ -70,6 +71,22 @@ struct bs_cache_key {
   uint8_t digest_set;
   uint8_t pad[15];
 } __attribute__((packed));
+
+static void
+print_bs_cache_key(struct bs_cache_key *key, const char *label, VALUE path)
+{
+  printf("%s:\n", label);
+  printf("  file: %s\n", RSTRING_PTR(path));
+  printf("  version: %u\n", key->version);
+  printf("  ruby_platform: %u\n", key->ruby_platform);
+  printf("  compile_option: %u\n", key->compile_option);
+  printf("  ruby_revision: %u\n", key->ruby_revision);
+  printf("  size: %" PRIu64 "\n", key->size);
+  printf("  mtime: %" PRIu64 "\n", key->mtime);
+  printf("  data_size: %" PRIu64 "\n", key->data_size);
+  printf("  digest: %" PRIu64 "\n", key->digest);
+  printf("  digest_set: %u\n", key->digest_set);
+}
 
 /*
  * If the struct padding isn't correct to pad the key to 64 bytes, refuse to
@@ -325,13 +342,12 @@ static enum cache_status cache_key_equal_fast_path(struct bs_cache_key *k1,
           k1->ruby_platform == k2->ruby_platform &&
           k1->compile_option == k2->compile_option &&
           k1->ruby_revision == k2->ruby_revision && k1->size == k2->size) {
-      /*if (k1->mtime == k2->mtime) {*/
-      /*  return hit;*/
-      /*}*/
+      if (k1->mtime == k2->mtime) {
+        return hit;
+      }
       if (revalidation) {
         return stale;
       }
-      return hit;
   }
   return miss;
 }
@@ -791,6 +807,8 @@ bs_fetch(char * path, VALUE path_v, char * cache_path, VALUE handler, VALUE args
   cache_fd = open_cache_file(cache_path, &cached_key, &errno_provenance);
   if (cache_fd == CACHE_MISS || cache_fd == CACHE_STALE) {
     /* This is ok: valid_cache remains false, we re-populate it. */
+    print_bs_cache_key(&current_key, "Current Key (Cache Miss or Stale)", path_v);
+    print_bs_cache_key(&cached_key, "Cached Key (Cache Miss or Stale)", path_v);
     bs_instrumentation(cache_fd == CACHE_MISS ? sym_miss : sym_stale, path_v);
   } else if (cache_fd < 0) {
     exception_message = rb_str_new_cstr(cache_path);
